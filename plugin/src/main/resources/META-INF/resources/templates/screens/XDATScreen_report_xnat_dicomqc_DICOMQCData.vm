@@ -1,0 +1,48 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 3.2//EN">
+$page.setTitle("Image QC")
+$page.setLinkColor($ui.alink)
+$page.setVlinkColor($ui.vlink)
+#if ($turbineUtils.GetPassedParameter("popup", $data))
+	#set ($popup = $turbineUtils.GetPassedParameter("popup", data) )
+	#set ($popup = "false")
+#end
+
+#set($pass_style = "color: #fff; background: green; text-align:center;")
+#set($warn_style = "color: #000; background: yellow; text-align:center;")
+#set($fail_style = "color: #fff; background: red; text-align:center;")
+
+<div>
+    <h2>ImgQC report</h2>
+
+	<TABLE width="100%">
+	    <TR>
+			<TD>
+				<TABLE>
+					<TR><TD>ID</TD><TD>$!item.getStringProperty("xnat_imgqc:ImgQCData/ID")</TD></TR>
+					<TR><TD>imageSession_ID</TD><TD>$!item.getStringProperty("xnat_imgqc:ImgQCData/imageSession_ID")</TD></TR>
+					<TR><TD>project</TD><TD>$!item.getStringProperty("xnat_imgqc:ImgQCData/project")</TD></TR>
+					<TR><TD>date</TD><TD>$!item.getProperty("xnat_imgqc:ImgQCData/date")</TD></TR>
+					<TR><TD>ImgQC version</TD><TD>$!item.getStringProperty("xnat_imgqc:ImgQCData/imgqcVersion")</TD></TR>		
+				</TABLE>
+			</TD>
+			<TD>#parse($turbineUtils.getTemplateName("actions",$om.getXSIType(),$project))</TD>
+		</TR>
+	</TABLE>
+
+	<TABLE>
+<!-- BEGIN scan -->
+    #foreach ($scan in $item.getChildItems("xnat_imgqc:ImgQCData/scan"))
+		<TR><TD span="2"><b>$!scan.getStringProperty("scan_id"): $!scan.getStringProperty("scan_type")</b></TD></TR>
+		#foreach ($test in $scan.getChildItems("test"))
+<!-- BEGIN test -->
+		<TR>
+			<TD>$!test.getStringProperty("name")</TD>
+			<TD>$!test.getStringProperty("result")</TD>
+		</TR>
+<!-- END test -->
+		#end
+<!-- END scan -->
+	#end
+	</TABLE>
+</div><BR>
+#parse("/screens/ReportProjectSpecificFields.vm")
