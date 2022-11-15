@@ -8,6 +8,9 @@ import requests
 import traceback
 import io
 import csv
+import logging
+
+LOG = logging.getLogger(__name__)
 
 import nibabel as nib
 
@@ -18,10 +21,10 @@ def convert_dicoms(dicomdir):
     niftidir = os.path.join(dicomdir, "nifti")
     os.makedirs(niftidir, exist_ok=True, mode=0o777)
     cmd = "dcm2niix -o %s %s %s" % (niftidir, "-m n -f %n_%p_%q -z y", dicomdir)
-    print(cmd)
+    LOG.info(cmd)
     retval = os.system(cmd)
     if retval != 0:
-        print(" - WARNING: DICOM->NIFTI conversion failed - skipping")
+        LOG.warning("DICOM->NIFTI conversion failed - skipping scan")
         return None
     return niftidir
 
@@ -43,10 +46,10 @@ def check_scan(options, scan, scandir, scanid):
 
     if not os.path.isdir(niftidir) or not os.listdir(niftidir):
         if not os.path.isdir(dicomdir) or not os.listdir(dicomdir):
-            print(f"   - No NIFTIs or DICOMs found, skipping scan")
-            return None
+            LOG.warning(f"No NIFTIs or DICOMs found, skipping scan")
+            return
         else:
-            print(f"   - No NIFTIs found, will use DICOMs instead")
+            LOG.info(f"No NIFTIs found, will use DICOMs instead")
             niftidir = convert_dicoms(dicomdir)
 
     for fname in os.listdir(niftidir):
@@ -54,16 +57,15 @@ def check_scan(options, scan, scandir, scanid):
         if not (fname.endswith(".nii") or fname.endswith(".nii.gz")):
             continue
         fpath = os.path.join(niftidir, fname)
-        print(fpath)
         if not os.path.isfile(fpath):
-            print(f"   - WARNING: {fpath} is not a file - ignoring")
-            return None
+            LOG.warning(f"{fpath} is not a file - ignoring")
+            return
 
         try:
             nii = nib.load(fpath)
         except:
-            print(f"   - {fname} for scan {scan} was not a valid NIFTI file - ignoring")
-            return None
+            LOG.warning(f"{fname} for scan {scan} was not a valid NIFTI file - ignoring")
+            return
 
         for test_name, test_impl in KNOWN_TESTS.items():
             result = test_impl(nii)
@@ -76,28 +78,29 @@ def check_scan(options, scan, scandir, scanid):
                     f"xnat:mrScanData/parameters/addParam[name={test_name}]/addField" : str(result),
                 }
                 r = requests.put(url, params=params, auth=(user, password), verify=False)
+                LOG.info(f"Set QC result: {test_name}={result}")
                 if r.status_code != 200:
-                    print(f" - Failed to set test result {test_name} for scan {scan}: {r.text}")
+                    LOG.warning(f"Failed to set test result {test_name} for scan {scan}: {r.text}")
             except Exception as exc:
-                print(f" - Failed to set test result {test_name} for scan {scan}: {str(exc)}")
-                traceback.print_exc()
+                LOG.exception(f"Failed to set test result {test_name} for scan {scan}")
 
 def check_session(options, sessiondir, scandata):
     """
     Run QC on a session
     """
-    print(f"Checking session from {sessiondir}")
+    LOG.info(f"Checking session from {sessiondir}")
     scansdir = [d for d in os.listdir(sessiondir) if d.lower() == "scans"]
     if len(scansdir) != 1:
-        raise RuntimeError(f"ERROR: Expected single scan dir, got {scansdir}")
+        raise RuntimeError(f"Expected single scan dir, got {scansdir}")
     scansdir = os.path.join(sessiondir, scansdir[0])
 
     for scan in os.listdir(scansdir):
         scandir = os.path.join(scansdir, scan)
-        print(f" - Checking {scan}")
+        LOG.info(f"Checking {scan}")
+        # FIXME very hacky, relies on consistent XNAT naming convention for dir.
         scanid = [scanmd["ID"] for scanmd in scandata if scan.startswith(scanmd["ID"])]
         if len(scanid) != 1:
-            print(f"ERROR - could not reliably get scan ID for {scan}: metadata was {scandata}")
+            LOG.warning(f"Could not reliably get scan ID for {scan}: metadata was {scandata} - skipping")
             continue
         check_scan(options, scan, scandir, scanid[0])
 
@@ -114,9 +117,6 @@ def main():
     Main script entry poin
     """
     options = ArgumentParser().parse_args()
-    if not os.path.isdir(options.input):
-        print(f"ERROR: Input directory {options.input} not specified or does not exist")
-        sys.exit(1)
 
     try:
         with open("version.txt") as f:
@@ -124,28 +124,36 @@ def main():
     except IOError:
         version = "(unknown)"
 
-    print(f"Image QC v{version}")
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+    LOG.info(f"Image QC v{version}")
 
-    # Hack to disable certificate validation for HTTPS connections. This is required
-    # becuase the certificate used for UoN servers are not always signed by a CA that
-    # is recognized by the fixed set of CA certificates built in to python requests.
-    os.environ["CURL_CA_BUNDLE"] = ""
+    try:
+        if not os.path.isdir(options.input):
+            raise RuntimeError(f"Input directory {options.input} does not exist")
 
-    # We need to download scan metadata to identify the ID of the scan more reliably from the directory name
-    host, user, password = os.environ["XNAT_HOST"], os.environ["XNAT_USER"], os.environ["XNAT_PASS"]
-    r = requests.get(f"{host}/data/projects/{options.project}/subjects/{options.subject}/experiments/{options.session}/scans?format=csv", verify=False, auth=(user, password))
-    if r.status_code != 200:
-        raise RuntimeError(f"Failed to download session scan data: {r.text}")
-    scandata = list(csv.DictReader(io.StringIO(r.text)))
-    
-    found_session = False
-    for path, dirs, files in os.walk(options.input):
-        if "scans" in [d.lower() for d in dirs]:
-            if not found_session:
-                found_session = True
-                check_session(options, path, scandata)
-            else:
-                print("WARN: Found another session: {path} - ignoring")
+        # Hack to disable certificate validation for HTTPS connections. This is required
+        # becuase the certificate used for UoN servers are not always signed by a CA that
+        # is recognized by the fixed set of CA certificates built in to python requests.
+        os.environ["CURL_CA_BUNDLE"] = ""
+
+        # We need to download scan metadata to identify the ID of the scan more reliably from the directory name
+        host, user, password = os.environ["XNAT_HOST"], os.environ["XNAT_USER"], os.environ["XNAT_PASS"]
+        r = requests.get(f"{host}/data/projects/{options.project}/subjects/{options.subject}/experiments/{options.session}/scans?format=csv", verify=False, auth=(user, password))
+        if r.status_code != 200:
+            raise RuntimeError(f"Failed to download session scan data: {r.text}")
+        scandata = list(csv.DictReader(io.StringIO(r.text)))
+
+        found_session = False
+        for path, dirs, files in os.walk(options.input):
+            if "scans" in [d.lower() for d in dirs]:
+                if not found_session:
+                    found_session = True
+                    check_session(options, path, scandata)
+                else:
+                    LOG.warning(f"Found another session: {path} - ignoring")
+    except Exception as exc:
+        LOG.error(exc)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
