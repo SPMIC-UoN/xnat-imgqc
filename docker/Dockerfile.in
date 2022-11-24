@@ -6,7 +6,14 @@ RUN apt-get update && apt-get upgrade -y && \
 	apt-get install -y build-essential pkg-config cmake git pigz && \
 	apt-get clean -y && apt-get autoclean -y && apt-get autoremove -y
 
-RUN pip install ukat>=0.6.1 validators wget
+# Get dcm2niix from github and compile
+RUN cd /tmp && \
+	git clone https://github.com/rordenlab/dcm2niix.git && \
+	cd dcm2niix && mkdir build && cd build && \
+	cmake -DBATCH_VERSION=ON -DUSE_OPENJPEG=ON .. && \
+	make && make install
+
+RUN pip install ukat>=0.6.4 validators wget
 
 ADD version.txt .
 ADD imgqc.py .
