@@ -10,8 +10,10 @@ import io
 import csv
 import logging
 import datetime
+import urllib3
 
 LOG = logging.getLogger(__name__)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 import nibabel as nib
 
@@ -171,8 +173,6 @@ def create_xml(options, session_results):
 def upload_xml(options, xml):
     """
     Upload new assessor to XNAT
-
-    FIXME delete if already exists?
     """
     with open("temp.xml", "w") as f:
         f.write(xml)
@@ -184,9 +184,17 @@ def upload_xml(options, xml):
         url = "%s/data/projects/%s/subjects/%s/experiments/%s/assessors/" % (options.host, options.project, options.subject, options.session)
         print(f"Post URL: {url}")
         r = requests.post(url, files=files, auth=(options.user, options.password), verify=False)
+        if r.status_code == 409:
+            LOG.info("ImgQC assessor already exists - will delete and replace")
+            delete_url = url + f"IMGQC_{options.session}"
+            r = requests.delete(delete_url, auth=(options.user, options.password), verify=False)
+            if r.status_code == 200:
+                f.seek(0)
+                r = requests.post(url, files=files, auth=(options.user, options.password), verify=False)
+
         if r.status_code != 200:
             sys.stderr.write(xml)
-            raise RuntimeError(f"Failed to create assessor: {r.text}")
+            raise RuntimeError(f"Failed to create assessor: {r.status_code} {r.text}")
 
 def main():
     """
@@ -220,7 +228,9 @@ def main():
         if not options.password:
             options.password = getpass.getpass()
 
-        r = requests.get(f"{options.host}/data/projects/{options.project}/subjects/{options.subject}/experiments/{options.session}/scans?format=csv", verify=False, auth=(options.user, options.password))
+        url = f"{options.host}/data/projects/{options.project}/subjects/{options.subject}/experiments/{options.session}/scans?format=csv"
+        LOG.info(f"Getting session scan metadata from {url}")
+        r = requests.get(url, verify=False, auth=(options.user, options.password))
         if r.status_code != 200:
             raise RuntimeError(f"Failed to download session scan data: {r.text}")
         scandata = list(csv.DictReader(io.StringIO(r.text)))
