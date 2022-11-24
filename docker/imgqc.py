@@ -10,6 +10,7 @@ import io
 import csv
 import logging
 import datetime
+import traceback
 import urllib3
 
 LOG = logging.getLogger(__name__)
@@ -20,8 +21,8 @@ import nibabel as nib
 from ukat.data import fetch
 from ukat.qa import snr
 
-def convert_dicoms(dicomdir):
-    niftidir = os.path.join(dicomdir, "nifti")
+def convert_dicoms(dicomdir, scanid):
+    niftidir = os.path.join("/tmp", str(scanid), "nifti")
     os.makedirs(niftidir, exist_ok=True, mode=0o777)
     cmd = "dcm2niix -o %s %s %s" % (niftidir, "-m n -f %n_%p_%q -z y", dicomdir)
     LOG.info(cmd)
@@ -48,13 +49,15 @@ def run_scan(options, scan, scandir, scanid):
         niftidir = os.path.join(scandir, "NIFTI")
         dicomdir = os.path.join(scandir, "DICOM")
 
-    if not os.path.isdir(niftidir) or not os.listdir(niftidir):
-        if not os.path.isdir(dicomdir) or not os.listdir(dicomdir):
-            LOG.warning(f"No NIFTIs or DICOMs found, skipping scan")
-            return
-        else:
-            LOG.info(f"No NIFTIs found, will use DICOMs instead")
-            niftidir = convert_dicoms(dicomdir)
+    #if not os.path.isdir(niftidir) or not os.listdir(niftidir):
+    #    if not os.path.isdir(dicomdir) or not os.listdir(dicomdir):
+    #        LOG.warning(f"No NIFTIs or DICOMs found, skipping scan")
+    #        return
+    #    else:
+    #        LOG.info(f"No NIFTIs found, will use DICOMs instead")
+    #        niftidir = convert_dicoms(dicomdir)
+    LOG.info(f"This version of IMGQC uses DICOMs in preference to NIFTI")
+    niftidir = convert_dicoms(dicomdir, scanid)
 
     for fname in os.listdir(niftidir):
         if not (fname.endswith(".nii") or fname.endswith(".nii.gz")):
@@ -68,6 +71,7 @@ def run_scan(options, scan, scandir, scanid):
         try:
             nii = nib.load(fpath)
         except:
+            traceback.print_exc()
             LOG.warning(f"{fname} for scan {scan} was not a valid NIFTI file - ignoring")
             continue
 
@@ -252,6 +256,7 @@ def main():
 
     except Exception as exc:
         LOG.error(exc)
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":
