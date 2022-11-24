@@ -186,19 +186,29 @@ def upload_xml(options, xml):
     with open("temp.xml", "r") as f:
         files = {'file': f}
         url = "%s/data/projects/%s/subjects/%s/experiments/%s/assessors/" % (options.host, options.project, options.subject, options.session)
-        print(f"Post URL: {url}")
-        r = requests.post(url, files=files, auth=(options.user, options.password), verify=False)
-        if r.status_code == 409:
-            LOG.info("ImgQC assessor already exists - will delete and replace")
-            delete_url = url + f"IMGQC_{options.session}"
-            r = requests.delete(delete_url, auth=(options.user, options.password), verify=False)
-            if r.status_code == 200:
+        while True:
+            print(f"Post URL: {url}")
+            r = requests.post(url, files=files, auth=(options.user, options.password), verify=False, allow_redirect=False)
+            if r.status_code in (301, 302):
+                LOG.info("Redirect: {r.headers['Location']}")
                 f.seek(0)
-                r = requests.post(url, files=files, auth=(options.user, options.password), verify=False)
+                url = r.headers["Location"]
+                continue
 
-        if r.status_code != 200:
-            sys.stderr.write(xml)
-            raise RuntimeError(f"Failed to create assessor: {r.status_code} {r.text}")
+            elif r.status_code == 409:
+                LOG.info("ImgQC assessor already exists - will delete and replace")
+                delete_url = url + f"IMGQC_{options.session}"
+                LOG.info(f"Delete URL: {delete_url}")
+                r = requests.delete(delete_url, auth=(options.user, options.password), verify=False)
+                if r.status_code == 200:
+                    LOG.info("Delete successful - re-posting")
+                    f.seek(0)
+                    continue
+
+            if r.status_code != 200:
+                sys.stderr.write(xml)
+                raise RuntimeError(f"Failed to create assessor: {r.status_code} {r.text}")
+            break
 
 def main():
     """
