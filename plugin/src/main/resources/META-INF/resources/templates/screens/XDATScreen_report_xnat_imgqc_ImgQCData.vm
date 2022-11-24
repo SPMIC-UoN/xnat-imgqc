@@ -31,7 +31,7 @@ $page.setVlinkColor($ui.vlink)
 
 	<TABLE>
 		<TR>
-		  <TH span="3"/>
+		  <TH span="2">Scan/test</TH>
 		  <TH>Population mean</TH>
 		  <TH>Population STD</TH>
 		  <TH>Result status</TH>
