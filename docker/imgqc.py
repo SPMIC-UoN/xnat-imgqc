@@ -2,13 +2,14 @@
 ImgQC: Simple image based quality control for XNAT MR sessions
 """
 import argparse
+import getpass
 import os
 import sys
 import requests
-import traceback
 import io
 import csv
 import logging
+import datetime
 
 LOG = logging.getLogger(__name__)
 
@@ -36,7 +37,8 @@ KNOWN_TESTS = {
     "iSNR" : calc_isnr,
 }
 
-def check_scan(options, scan, scandir, scanid):
+def run_scan(options, scan, scandir, scanid):
+    scan_results = {"id" : scanid, "type" : scan, "images" : {}}
     if os.path.isdir(os.path.join(scandir, "resources")):
         niftidir = os.path.join(scandir, "resources", "NIFTI")
         dicomdir = os.path.join(scandir, "resources", "DICOM")
@@ -53,42 +55,51 @@ def check_scan(options, scan, scandir, scanid):
             niftidir = convert_dicoms(dicomdir)
 
     for fname in os.listdir(niftidir):
-        # FIXME what if more than one NIFTI?
         if not (fname.endswith(".nii") or fname.endswith(".nii.gz")):
             continue
+
         fpath = os.path.join(niftidir, fname)
         if not os.path.isfile(fpath):
-            LOG.warning(f"{fpath} is not a file - ignoring")
-            return
+            LOG.warning(f"{fpath} for scan {scan} is not a file - ignoring")
+            continue
 
         try:
             nii = nib.load(fpath)
         except:
             LOG.warning(f"{fname} for scan {scan} was not a valid NIFTI file - ignoring")
-            return
+            continue
 
+        img_name = fname[:fname.index(".nii")]
+        scan_results["images"][img_name] = {}
         for test_name, test_impl in KNOWN_TESTS.items():
             result = test_impl(nii)
-            try:
-                host, user, password = os.environ["XNAT_HOST"], os.environ["XNAT_USER"], os.environ["XNAT_PASS"]
-                os.environ["CURL_CA_BUNDLE"] = "" # Hack to disable CA verification
-                url = f"{host}/data/projects/cmore/subjects/XNAT_S00017/experiments/XNAT_E00116/scans/{scanid}"
-                params = {
-                    "xsiType" : "xnat:mrScanData",
-                    f"xnat:mrScanData/parameters/addParam[name={test_name}]/addField" : str(result),
-                }
-                r = requests.put(url, params=params, auth=(user, password), verify=False)
-                LOG.info(f"Set QC result: {test_name}={result}")
-                if r.status_code != 200:
-                    LOG.warning(f"Failed to set test result {test_name} for scan {scan}: {r.text}")
-            except Exception as exc:
-                LOG.exception(f"Failed to set test result {test_name} for scan {scan}")
+            scan_results["images"][img_name][test_name] = result
 
-def check_session(options, sessiondir, scandata):
+            if options.set_imgprops:
+                # Set image result as a property on the scan
+                try:
+                    full_test_name = f"{test_name} ({img_name})"
+                    url = f"{options.host}/data/projects/cmore/subjects/XNAT_S00017/experiments/XNAT_E00116/scans/{scanid}"
+                    params = {
+                        "xsiType" : "xnat:mrScanData",
+                        f"xnat:mrScanData/parameters/addParam[name={full_test_name}]/addField" : str(result),
+                    }
+                    r = requests.put(url, params=params, auth=(options.user, options.password), verify=False)
+                    LOG.info(f"Set QC result: {full_test_name}={result}")
+                    if r.status_code != 200:
+                        LOG.warning(f"Failed to set test result {full_test_name} for scan {scan}: {r.text}")
+                except Exception as exc:
+                    LOG.exception(f"Failed to set test result {full_test_name} for scan {scan}: {str(exc)}")
+
+    return scan_results
+
+def run_session(options, sessiondir, scandata):
     """
-    Run QC on a session
+    Run image QC on all scans in a session
     """
     LOG.info(f"Checking session from {sessiondir}")
+    session_results = {}
+
     scansdir = [d for d in os.listdir(sessiondir) if d.lower() == "scans"]
     if len(scansdir) != 1:
         raise RuntimeError(f"Expected single scan dir, got {scansdir}")
@@ -102,7 +113,8 @@ def check_session(options, sessiondir, scandata):
         if len(scanid) != 1:
             LOG.warning(f"Could not reliably get scan ID for {scan}: metadata was {scandata} - skipping")
             continue
-        check_scan(options, scan, scandir, scanid[0])
+        session_results[scan] = run_scan(options, scan, scandir, scanid[0])
+    return session_results
 
 class ArgumentParser(argparse.ArgumentParser):
     def __init__(self, **kwargs):
@@ -111,6 +123,70 @@ class ArgumentParser(argparse.ArgumentParser):
         self.add_argument("--project", help="XNAT project")
         self.add_argument("--subject", help="XNAT subject")
         self.add_argument("--session", help="XNAT session")
+        self.add_argument("--set-imgprops", action="store_true", default=False, help="Set test result properties directly on images")
+
+XML_HEADER = """<?xml version="1.0" encoding="UTF-8"?>
+<ImgQCData xmlns="http://github.com/spmic-uon/xnat-imgqc" 
+           xmlns:xnat="http://nrg.wustl.edu/xnat" 
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+"""
+
+XML_FOOTER = """
+</ImgQCData>
+"""
+
+def create_xml(options, session_results):
+    """
+    Create XML assessor document
+    """
+    timestamp = datetime.datetime.today().strftime('%Y-%m-%d') 
+    xml = XML_HEADER
+    xml += f"  <imgqcVersion>{options.version}</imgqcVersion>\n"
+    xml += f"  <xnat:label>IMGQC_{options.session}</xnat:label>\n"
+    xml += f"  <xnat:date>{timestamp}</xnat:date>\n"
+
+    for scan in session_results.values():
+        xml += "  <scan>\n"
+        xml += f"    <scan_id>{scan['id']}</scan_id>\n"
+        xml += f"    <scan_type>{scan['type']}</scan_type>\n"
+        multi_img = True if len(scan["images"]) > 1 else False
+        for img_name, tests in scan["images"].items():
+            for test_name, result in tests.items():
+                xml += f"    <test>\n"
+                test_name = test_name.replace("<", "[").replace(">", "]")[:200]
+                if multi_img:
+                    test_name += f" ({img_name})"
+                xml += f"      <test_name>{test_name}</test_name>\n"
+                xml += f"      <result>{result}</result>\n"
+                # FIXME This will be added when we have a means of calculating and storing population results
+                #xml += f"      <pop_mean>{pop_mean}</pop_mean>\n"
+                #xml += f"      <pop_std>{pop_std}</pop_std>\n"
+                #xml += f"      <status>{status}</status>\n"
+                xml += f"    </test>\n"
+        xml += "  </scan>\n"
+    xml += XML_FOOTER
+    LOG.info(f"Generated XML:\n{xml}")
+    return xml
+
+def upload_xml(options, xml):
+    """
+    Upload new assessor to XNAT
+
+    FIXME delete if already exists?
+    """
+    with open("temp.xml", "w") as f:
+        f.write(xml)
+    print(f"Uploading XML to {options.host}")
+    print(xml)
+
+    with open("temp.xml", "r") as f:
+        files = {'file': f}
+        url = "%s/data/projects/%s/subjects/%s/experiments/%s/assessors/" % (options.host, options.project, options.subject, options.session)
+        print(f"Post URL: {url}")
+        r = requests.post(url, files=files, auth=(options.user, options.password), verify=False)
+        if r.status_code != 200:
+            sys.stderr.write(xml)
+            raise RuntimeError(f"Failed to create assessor: {r.text}")
 
 def main():
     """
@@ -120,12 +196,12 @@ def main():
 
     try:
         with open("version.txt") as f:
-            version = f.read()
+            options.version = f.read().strip()
     except IOError:
-        version = "(unknown)"
+        options.version = "(unknown)"
 
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-    LOG.info(f"Image QC v{version}")
+    LOG.info(f"Image QC v{options.version}")
 
     try:
         if not os.path.isdir(options.input):
@@ -134,11 +210,17 @@ def main():
         # Hack to disable certificate validation for HTTPS connections. This is required
         # becuase the certificate used for UoN servers are not always signed by a CA that
         # is recognized by the fixed set of CA certificates built in to python requests.
-        os.environ["CURL_CA_BUNDLE"] = ""
+        #os.environ["CURL_CA_BUNDLE"] = ""
 
         # We need to download scan metadata to identify the ID of the scan more reliably from the directory name
-        host, user, password = os.environ["XNAT_HOST"], os.environ["XNAT_USER"], os.environ["XNAT_PASS"]
-        r = requests.get(f"{host}/data/projects/{options.project}/subjects/{options.subject}/experiments/{options.session}/scans?format=csv", verify=False, auth=(user, password))
+        # The scan ID is required in order to set scan properties correctly via REST - the scan label does not always work
+        options.host, options.user, options.password = os.environ["XNAT_HOST"], os.environ.get("XNAT_USER", None), os.environ.get("XNAT_PASS", None)
+        if not options.user:
+            options.user = getpass.getuser()
+        if not options.password:
+            options.password = getpass.getpass()
+
+        r = requests.get(f"{options.host}/data/projects/{options.project}/subjects/{options.subject}/experiments/{options.session}/scans?format=csv", verify=False, auth=(options.user, options.password))
         if r.status_code != 200:
             raise RuntimeError(f"Failed to download session scan data: {r.text}")
         scandata = list(csv.DictReader(io.StringIO(r.text)))
@@ -148,9 +230,16 @@ def main():
             if "scans" in [d.lower() for d in dirs]:
                 if not found_session:
                     found_session = True
-                    check_session(options, path, scandata)
+                    session_results = run_session(options, path, scandata)
                 else:
                     LOG.warning(f"Found another session: {path} - ignoring")
+
+        if not found_session:
+            LOG.warning(f"No sessions found")
+
+        xml = create_xml(options, session_results)
+        upload_xml(options, xml)
+
     except Exception as exc:
         LOG.error(exc)
         sys.exit(1)
