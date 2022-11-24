@@ -156,7 +156,7 @@ def create_xml(options, session_results):
                 test_name = test_name.replace("<", "[").replace(">", "]")[:200]
                 if multi_img:
                     test_name += f" ({img_name})"
-                xml += f"      <test_name>{test_name}</test_name>\n"
+                xml += f"      <name>{test_name}</name>\n"
                 xml += f"      <result>{result}</result>\n"
                 # FIXME This will be added when we have a means of calculating and storing population results
                 #xml += f"      <pop_mean>{pop_mean}</pop_mean>\n"
