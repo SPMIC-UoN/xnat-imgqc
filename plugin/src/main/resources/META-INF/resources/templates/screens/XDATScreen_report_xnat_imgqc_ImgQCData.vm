@@ -31,7 +31,7 @@ $page.setVlinkColor($ui.vlink)
 
 	<TABLE>
 		<TR>
-		  <TH span="2"/>
+		  <TH span="3"/>
 		  <TH>Population mean</TH>
 		  <TH>Population STD</TH>
 		  <TH>Result status</TH>
@@ -47,16 +47,16 @@ $page.setVlinkColor($ui.vlink)
 			<TD>$!test.getStringProperty("result")</TD>
 			<TD>$!test.getStringProperty("pop_mean")</TD>
 			<TD>$!test.getStringProperty("pop_std")</TD>
-			set($status=$!test.getStringProperty("status"))
-			if($status == "PASS")
-				set($style=$pass_style)
-			else if($status == "WARN")
-				set($style=$warn_style)
-			else if($status == "FAIL")
-				set($style=$fail_style)
-			else
-				set($style="")
-			end
+			#set($status=$!test.getStringProperty("status"))
+			#if($status == "PASS")
+				#set($style=$pass_style)
+			#elseif($status == "WARN")
+				#set($style=$warn_style)
+			#elseif($status == "FAIL")
+				#set($style=$fail_style)
+			#else
+				#set($style="")
+			#end
 			<TD style="$style">$!test.getStringProperty("status")</TD>
 		</TR>
 		<!-- tests -->
