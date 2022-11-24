@@ -31,6 +31,9 @@
                                         <xs:sequence>
                                             <xs:element name="name" type="xs:string" minOccurs="1" maxOccurs="1"/>
                                             <xs:element name="result" type="xs:float" minOccurs="1" maxOccurs="1"/>
+                                            <xs:element name="pop_mean" type="xs:float" minOccurs="0" maxOccurs="1"/>
+                                            <xs:element name="pop_std" type="xs:float" minOccurs="0" maxOccurs="1"/>
+                                            <xs:element name="status" type="xs:string" minOccurs="0" maxOccurs="1"/>
                                         </xs:sequence>
                                     </xs:complexType>
                                 </xs:element>
