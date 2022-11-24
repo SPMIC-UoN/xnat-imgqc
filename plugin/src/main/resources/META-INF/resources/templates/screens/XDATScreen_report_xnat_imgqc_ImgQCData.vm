@@ -30,18 +30,38 @@ $page.setVlinkColor($ui.vlink)
 	</TABLE>
 
 	<TABLE>
-<!-- BEGIN scan -->
+		<TR>
+		  <TH span="2"/>
+		  <TH>Population mean</TH>
+		  <TH>Population STD</TH>
+		  <TH>Result status</TH>
+		</TR>
+
+	<!-- Iterate over scans -->
     #foreach ($scan in $item.getChildItems("xnat_imgqc:ImgQCData/scan"))
-		<TR><TD span="2"><b>$!scan.getStringProperty("scan_id"): $!scan.getStringProperty("scan_type")</b></TD></TR>
+		<TR><TD span="5"><b>$!scan.getStringProperty("scan_id"): $!scan.getStringProperty("scan_type")</b></TD></TR>
+		<!-- Iterate over tests -->
 		#foreach ($test in $scan.getChildItems("test"))
-<!-- BEGIN test -->
 		<TR>
 			<TD>$!test.getStringProperty("name")</TD>
 			<TD>$!test.getStringProperty("result")</TD>
+			<TD>$!test.getStringProperty("pop_mean")</TD>
+			<TD>$!test.getStringProperty("pop_std")</TD>
+			set($status=$!test.getStringProperty("status"))
+			if($status == "PASS")
+				set($style=$pass_style)
+			else if($status == "WARN")
+				set($style=$warn_style)
+			else if($status == "FAIL")
+				set($style=$fail_style)
+			else
+				set($style="")
+			end
+			<TD style="$style">$!test.getStringProperty("status")</TD>
 		</TR>
-<!-- END test -->
+		<!-- tests -->
 		#end
-<!-- END scan -->
+	<!-- scans -->
 	#end
 	</TABLE>
 </div><BR>
