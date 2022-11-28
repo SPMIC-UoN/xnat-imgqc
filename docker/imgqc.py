@@ -17,6 +17,7 @@ LOG = logging.getLogger(__name__)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 import nibabel as nib
+import numpy as np
 
 from ukat.data import fetch
 from ukat.qa import snr
@@ -129,6 +130,7 @@ class ArgumentParser(argparse.ArgumentParser):
         self.add_argument("--project", help="XNAT project")
         self.add_argument("--subject", help="XNAT subject")
         self.add_argument("--session", help="XNAT session")
+        self.add_argument("--pop-stats", help="File containing population statistics in format <test_name> <mean> <std>")
         self.add_argument("--set-imgprops", action="store_true", default=False, help="Set test result properties directly on images")
 
 XML_HEADER = """<?xml version="1.0" encoding="UTF-8"?>
@@ -163,11 +165,17 @@ def create_xml(options, session_results):
                 if multi_img:
                     test_name += f" ({img_name})"
                 xml += f"      <name>{test_name}</name>\n"
-                xml += f"      <result>{result}</result>\n"
-                # FIXME This will be added when we have a means of calculating and storing population results
-                #xml += f"      <pop_mean>{pop_mean}</pop_mean>\n"
-                #xml += f"      <pop_std>{pop_std}</pop_std>\n"
-                #xml += f"      <status>{status}</status>\n"
+                xml += f"      <result>{result:.3f}</result>\n"
+
+                pop_stats = options.pop_stats.get(test_name.split()[0].lower(), None)
+                LOG.info(f"Population stats for {test_name}: {pop_stats}")
+                if pop_stats:
+                    mean, std = pop_stats
+                    sigma = np.abs(result - mean) / std
+                    status = "PASS" if sigma < 2 else "WARN" if sigma < 3 else "FAIL"
+                    xml += f"      <pop_mean>{mean:.3f}</pop_mean>\n"
+                    xml += f"      <pop_std>{std:.3f}</pop_std>\n"
+                    xml += f"      <status>{status}</status>\n"
                 xml += f"    </test>\n"
         xml += "  </scan>\n"
     xml += XML_FOOTER
@@ -180,15 +188,14 @@ def upload_xml(options, xml):
     """
     with open("temp.xml", "w") as f:
         f.write(xml)
-    print(f"Uploading XML to {options.host}")
-    print(xml)
+    LOG.info(f"Uploading XML to {options.host}")
 
     with open("temp.xml", "r") as f:
         files = {'file': f}
         url = "%s/data/projects/%s/subjects/%s/experiments/%s/assessors/" % (options.host, options.project, options.subject, options.session)
         while True:
-            print(f"Post URL: {url}")
-            r = requests.post(url, files=files, auth=(options.user, options.password), verify=False, allow_redirect=False)
+            LOG.info(f"Post URL: {url}")
+            r = requests.post(url, files=files, auth=(options.user, options.password), verify=False, allow_redirects=False)
             if r.status_code in (301, 302):
                 LOG.info("Redirect: {r.headers['Location']}")
                 f.seek(0)
@@ -209,7 +216,40 @@ def upload_xml(options, xml):
                 sys.stderr.write(xml)
                 raise RuntimeError(f"Failed to create assessor: {r.status_code} {r.text}")
             break
+     
+def get_pop_stats(options):
+    fname = options.pop_stats
+    if not fname:
+        LOG.info("Downloading population stats from XNAT")
+        try:
+            fname = "pop_stats.txt"
+            with requests.get(f"{options.host}/data/projects/{options.project}/resources/imgqc/files/imgqc_pop_stats.txt", 
+                            auth=(options.user, options.password), verify=False, stream=True) as r:
+                r.raise_for_status()
+                with open(fname, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192): 
+                        f.write(chunk)
+        except:
+            traceback.print_exc()
+            LOG.warn("Population statistics config could not be downloaded - no population flagging will be possible")
+            return {}
 
+    pop_stats = {}
+    with open(fname, "r") as f:
+        lines = f.readlines()
+        for line in lines:
+            try:
+                test_name, mean, std = line.split()
+                mean = float(mean)
+                std = float(std)
+                pop_stats[test_name.strip().lower()] = (mean, std)
+                LOG.info(f"Population stats: {test_name} {mean} {std}")
+            except:
+                traceback.print_exc()
+                LOG.warn("Population statistics config line could not be parsed - {line}: expected test_name mean std")
+
+    return pop_stats
+    
 def main():
     """
     Main script entry poin
@@ -248,6 +288,8 @@ def main():
         if r.status_code != 200:
             raise RuntimeError(f"Failed to download session scan data: {r.text}")
         scandata = list(csv.DictReader(io.StringIO(r.text)))
+
+        options.pop_stats = get_pop_stats(options)
 
         found_session = False
         for path, dirs, files in os.walk(options.input):
