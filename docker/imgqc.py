@@ -36,7 +36,14 @@ def convert_dicoms(dicomdir, scanid):
 def calc_isnr(nii):
     isnr = snr.Isnr(nii.get_fdata(), nii.header.get_best_affine()).isnr
     return isnr
-    
+     
+def get_test_stats(options, test_name, img_name):
+    test_stats = options.pop_stats.get(test_name.split()[0].lower(), None)
+    if test_stats:
+        for matcher, mean, std in test_stats:
+            if matcher == "*" or matcher.lower() in img_name.lower():
+                return mean, std
+
 KNOWN_TESTS = {
     "iSNR" : calc_isnr,
 }
@@ -92,7 +99,7 @@ def run_scan(options, scan, scandir, scanid):
                         f"xnat:mrScanData/parameters/addParam[name={full_test_name}]/addField" : str(result),
                     }
                     r = requests.put(url, params=params, auth=(options.user, options.password), verify=False)
-                    LOG.info(f"Set QC result: {full_test_name}={result}")
+                    LOG.info(f"Set QC result: {test_name}:{img_name}={result}")
                     if r.status_code != 200:
                         LOG.warning(f"Failed to set test result {full_test_name} for scan {scan}: {r.text}")
                 except Exception as exc:
@@ -157,18 +164,16 @@ def create_xml(options, session_results):
         xml += "  <scan>\n"
         xml += f"    <scan_id>{scan['id']}</scan_id>\n"
         xml += f"    <scan_type>{scan['type']}</scan_type>\n"
-        multi_img = True if len(scan["images"]) > 1 else False
         for img_name, tests in scan["images"].items():
             for test_name, result in tests.items():
                 xml += f"    <test>\n"
                 test_name = test_name.replace("<", "[").replace(">", "]")[:200]
-                if multi_img:
-                    test_name += f" ({img_name})"
                 xml += f"      <name>{test_name}</name>\n"
+                xml += f"      <img>{img_name}</img>\n"
                 xml += f"      <result>{result:.3f}</result>\n"
 
-                pop_stats = options.pop_stats.get(test_name.split()[0].lower(), None)
-                LOG.info(f"Population stats for {test_name}: {pop_stats}")
+                pop_stats = get_test_stats(options, test_name, img_name)
+                LOG.info(f"Population stats for {test_name} / {img_name}: {pop_stats}")
                 if pop_stats:
                     mean, std = pop_stats
                     sigma = np.abs(result - mean) / std
@@ -239,11 +244,14 @@ def get_pop_stats(options):
         lines = f.readlines()
         for line in lines:
             try:
-                test_name, mean, std = line.split()
+                test_name, img_matcher, mean, std = line.split()
                 mean = float(mean)
                 std = float(std)
-                pop_stats[test_name.strip().lower()] = (mean, std)
-                LOG.info(f"Population stats: {test_name} {mean} {std}")
+                test_name = test_name.strip().lower()
+                if test_name not in pop_stats:
+                    pop_stats[test_name] = []
+                pop_stats[test_name].append((img_matcher, mean, std))
+                LOG.info(f"Population stats: {test_name} {img_matcher} {mean} {std}")
             except:
                 traceback.print_exc()
                 LOG.warn("Population statistics config line could not be parsed - {line}: expected test_name mean std")
