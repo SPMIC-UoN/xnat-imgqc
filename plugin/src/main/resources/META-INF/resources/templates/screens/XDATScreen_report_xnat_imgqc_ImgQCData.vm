@@ -7,9 +7,9 @@ $page.setVlinkColor($ui.vlink)
 	#set ($popup = "false")
 #end
 
-#set($pass_style = "color: #fff; background: green; text-align:center;")
-#set($warn_style = "color: #000; background: yellow; text-align:center;")
-#set($fail_style = "color: #fff; background: red; text-align:center;")
+#set($pass_style = "color: #fff; background: green; text-align:center; padding-left: 10px; padding-right: 10px;")
+#set($warn_style = "color: #000; background: yellow; text-align:center; padding-left: 10px; padding-right: 10px;")
+#set($fail_style = "color: #fff; background: red; text-align:center; padding-left: 10px; padding-right: 10px;")
 
 <div>
     <h2>ImgQC report</h2>
@@ -31,7 +31,8 @@ $page.setVlinkColor($ui.vlink)
 
 	<TABLE>
 		<TR>
-		  <TH span="2">Scan/test</TH>
+		  <TH/>
+		  <TH>Result</TH>
 		  <TH>Population mean</TH>
 		  <TH>Population STD</TH>
 		  <TH>Result status</TH>
