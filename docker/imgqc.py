@@ -18,6 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 import nibabel as nib
 import numpy as np
+import pandas as pd
 
 from ukat.data import fetch
 from ukat.qa import snr
@@ -45,8 +46,28 @@ def get_test_stats(options, test_name, img_name):
                 return mean, std
 
 KNOWN_TESTS = {
-    "iSNR" : calc_isnr,
+    "isnr" : calc_isnr,
 }
+
+def test_is_relevant(img_name, matchers, exclusions, vendors):
+    matched = False
+    for m in matchers:
+        LOG.debug(f"Checking matcher: {m.lower()}, {img_name.lower()}")
+        if m.lower() in img_name.lower():
+            LOG.debug("match")
+            matched = True
+            break
+
+    if matched:
+        for e in exclusions:
+            LOG.debug(f"Checking exclusion: {e.lower()}, {img_name.lower()}")
+            if e.lower() in img_name.lower():
+                LOG.debug("excluded")
+                matched = False
+                break
+
+    # FIXME vendor check requires json metadata
+    return matched
 
 def run_scan(options, scan, scandir, scanid):
     scan_results = {"id" : scanid, "type" : scan, "images" : {}}
@@ -57,13 +78,6 @@ def run_scan(options, scan, scandir, scanid):
         niftidir = os.path.join(scandir, "NIFTI")
         dicomdir = os.path.join(scandir, "DICOM")
 
-    #if not os.path.isdir(niftidir) or not os.listdir(niftidir):
-    #    if not os.path.isdir(dicomdir) or not os.listdir(dicomdir):
-    #        LOG.warning(f"No NIFTIs or DICOMs found, skipping scan")
-    #        return
-    #    else:
-    #        LOG.info(f"No NIFTIs found, will use DICOMs instead")
-    #        niftidir = convert_dicoms(dicomdir)
     LOG.info(f"This version of IMGQC uses DICOMs in preference to NIFTI")
     niftidir = convert_dicoms(dicomdir, scanid)
 
@@ -85,29 +99,31 @@ def run_scan(options, scan, scandir, scanid):
 
         img_name = fname[:fname.index(".nii")]
         scan_results["images"][img_name] = {}
-        for test_name, test_impl in KNOWN_TESTS.items():
-            result = test_impl(nii)
-            scan_results["images"][img_name][test_name] = result
+        LOG.info(f"Looking for tests for scan {img_name}")
+        for matchers, exclusions, vendors, test_name, mean, std, amber, red in options.tests:
+            test_impl = KNOWN_TESTS.get(test_name, None)
+            if test_impl is None:
+                LOG.warning(f"Unknown test: {test_name} - skipping")
+                continue
+            
+            if test_is_relevant(img_name, matchers, exclusions, vendors):
+                LOG.info(f"Applying test {test_name} to scan {img_name}")
+                result = test_impl(nii)
+                scan_results["images"][img_name][test_name] = {"result" : result}
 
-            if options.set_imgprops:
-                # Set image result as a property on the scan
-                try:
-                    full_test_name = f"{test_name} ({img_name})"
-                    url = f"{options.host}/data/projects/cmore/subjects/XNAT_S00017/experiments/XNAT_E00116/scans/{scanid}"
-                    params = {
-                        "xsiType" : "xnat:mrScanData",
-                        f"xnat:mrScanData/parameters/addParam[name={full_test_name}]/addField" : str(result),
-                    }
-                    r = requests.put(url, params=params, auth=(options.user, options.password), verify=False)
-                    LOG.info(f"Set QC result: {test_name}:{img_name}={result}")
-                    if r.status_code != 200:
-                        LOG.warning(f"Failed to set test result {full_test_name} for scan {scan}: {r.text}")
-                except Exception as exc:
-                    LOG.exception(f"Failed to set test result {full_test_name} for scan {scan}: {str(exc)}")
+                if mean and std and amber and red:
+                    LOG.info(f"Population stats for {test_name} / {img_name}: {mean} {std}")
+                    sigma = np.abs(result - mean) / std
+                    status = "PASS" if sigma < amber else "WARN" if sigma < red else "FAIL"
+                    scan_results["images"][img_name][test_name]["mean"] = mean
+                    scan_results["images"][img_name][test_name]["std"] = std
+                    scan_results["images"][img_name][test_name]["status"] = status
+                else:
+                    LOG.info(f"No population stats for {test_name} / {img_name}")
 
     return scan_results
 
-def run_session(options, sessiondir, scandata):
+def run_session(options, sessiondir):
     """
     Run image QC on all scans in a session
     """
@@ -123,22 +139,12 @@ def run_session(options, sessiondir, scandata):
         scandir = os.path.join(scansdir, scan)
         LOG.info(f"Checking {scan}")
         # FIXME very hacky, relies on consistent XNAT naming convention for dir.
-        scanid = [scanmd["ID"] for scanmd in scandata if scan.startswith(scanmd["ID"])]
+        scanid = [scanmd["ID"] for scanmd in options.scan_metadata if scan.startswith(scanmd["ID"])]
         if len(scanid) != 1:
-            LOG.warning(f"Could not reliably get scan ID for {scan}: metadata was {scandata} - skipping")
+            LOG.warning(f"Could not reliably get scan ID for {scan}: metadata was {options.scan_metadata} - skipping")
             continue
         session_results[scan] = run_scan(options, scan, scandir, scanid[0])
     return session_results
-
-class ArgumentParser(argparse.ArgumentParser):
-    def __init__(self, **kwargs):
-        argparse.ArgumentParser.__init__(self, prog="imgqc", add_help=False, **kwargs)
-        self.add_argument("--input", help="Input directory", required=True)
-        self.add_argument("--project", help="XNAT project")
-        self.add_argument("--subject", help="XNAT subject")
-        self.add_argument("--session", help="XNAT session")
-        self.add_argument("--pop-stats", help="File containing population statistics in format <test_name> <mean> <std>")
-        self.add_argument("--set-imgprops", action="store_true", default=False, help="Set test result properties directly on images")
 
 XML_HEADER = """<?xml version="1.0" encoding="UTF-8"?>
 <ImgQCData xmlns="http://github.com/spmic-uon/xnat-imgqc" 
@@ -165,19 +171,15 @@ def create_xml(options, session_results):
         xml += f"    <scan_id>{scan['id']}</scan_id>\n"
         xml += f"    <scan_type>{scan['type']}</scan_type>\n"
         for img_name, tests in scan["images"].items():
-            for test_name, result in tests.items():
+            for test_name, test_data in tests.items():
+                result = test_data["result"]
                 xml += f"    <test>\n"
                 test_name = test_name.replace("<", "[").replace(">", "]")[:200]
                 xml += f"      <name>{test_name}</name>\n"
                 xml += f"      <img>{img_name}</img>\n"
                 xml += f"      <result>{result:.3f}</result>\n"
-
-                pop_stats = get_test_stats(options, test_name, img_name)
-                LOG.info(f"Population stats for {test_name} / {img_name}: {pop_stats}")
-                if pop_stats:
-                    mean, std = pop_stats
-                    sigma = np.abs(result - mean) / std
-                    status = "PASS" if sigma < 2 else "WARN" if sigma < 3 else "FAIL"
+                if "status" in test_data:
+                    mean, std, status = test_data["mean"], test_data["std"], test_data["status"]
                     xml += f"      <pop_mean>{mean:.3f}</pop_mean>\n"
                     xml += f"      <pop_std>{std:.3f}</pop_std>\n"
                     xml += f"      <status>{status}</status>\n"
@@ -221,46 +223,82 @@ def upload_xml(options, xml):
                 sys.stderr.write(xml)
                 raise RuntimeError(f"Failed to create assessor: {r.status_code} {r.text}")
             break
-     
-def get_pop_stats(options):
-    fname = options.pop_stats
-    if not fname:
-        LOG.info("Downloading population stats from XNAT")
-        try:
-            fname = "pop_stats.txt"
-            with requests.get(f"{options.host}/data/projects/{options.project}/resources/imgqc/files/imgqc_pop_stats.txt", 
-                            auth=(options.user, options.password), verify=False, stream=True) as r:
-                r.raise_for_status()
-                with open(fname, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192): 
-                        f.write(chunk)
-        except:
-            traceback.print_exc()
-            LOG.warn("Population statistics config could not be downloaded - no population flagging will be possible")
-            return {}
 
-    pop_stats = {}
-    with open(fname, "r") as f:
-        lines = f.readlines()
-        for line in lines:
-            try:
-                test_name, img_matcher, mean, std = line.split()
-                mean = float(mean)
-                std = float(std)
-                test_name = test_name.strip().lower()
-                if test_name not in pop_stats:
-                    pop_stats[test_name] = []
-                pop_stats[test_name].append((img_matcher, mean, std))
-                LOG.info(f"Population stats: {test_name} {img_matcher} {mean} {std}")
-            except:
-                traceback.print_exc()
-                LOG.warn("Population statistics config line could not be parsed - {line}: expected test_name mean std")
-
-    return pop_stats
+def get_test_config(options):
+    """
+    Read test configuration which is stored in an Excel spreadsheet with coloumns:
     
+    matchers, exclusions, vendors, test, mean, std, amber, red
+    """
+    fname = options.config
+    if not fname:
+        LOG.info("Downloading config from XNAT")
+        fname = "downloaded_config.xlsx"
+        with requests.get(f"{options.host}/data/projects/{options.project}/resources/imgqc/files/imgqc_conf.xlsx",
+                          auth=(options.user, options.password), stream=True) as r:
+            r.raise_for_status()
+            with open(fname, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192): 
+                    f.write(chunk)
+
+    sheet = pd.read_excel(fname, dtype=str)
+    test_config = sheet.fillna('')
+    tests = []
+    for index, row in test_config.iterrows():
+        LOG.info(row)
+        if len(row) < 8:
+            LOG.warning(f"Invalid row - at least 8 columns required. Skipping")
+            continue
+
+        matchers, exclusions, vendors, test, mean, std, amber, red = row[:8]
+        matchers = [m.strip().upper() for m in matchers.split(",")]
+        exclusions = [e.strip().upper() for e in exclusions.split(",") if e.strip() != ""]
+        vendors = [v.strip().upper() for v in vendors.split(",") if v.strip() != ""]
+        test = test.strip().lower()
+        if not test:
+            LOG.warning(f"Test name missing - skipping")
+            continue
+
+        try:
+            if mean: mean = float(mean)
+            if std: std = float(std)
+            if amber: amber = float(amber)
+            if red: red = float(red)
+        except ValueError:
+            LOG.warning(f"Invalid numeric data in row {row} - skipping")
+            continue
+
+        tests.append((matchers, exclusions, vendors, test, mean, std, amber, red))
+
+    return tests
+
+def get_scan_metadata(options):
+    """
+    Get information on scan IDs and names
+
+    We need to download scan metadata to identify the ID of the scan more reliably from the directory name
+    The scan ID is required in order to set scan properties correctly via REST - the scan label does not always work
+    """
+    url = f"{options.host}/data/projects/{options.project}/subjects/{options.subject}/experiments/{options.session}/scans?format=csv"
+    LOG.info(f"Getting session scan metadata from {url}")
+    r = requests.get(url, verify=False, auth=(options.user, options.password))
+    if r.status_code != 200:
+        raise RuntimeError(f"Failed to download session scan data: {r.text}")
+    return list(csv.DictReader(io.StringIO(r.text)))
+
+class ArgumentParser(argparse.ArgumentParser):
+    def __init__(self, **kwargs):
+        argparse.ArgumentParser.__init__(self, prog="imgqc", add_help=False, **kwargs)
+        self.add_argument("--input", help="Input directory", required=True)
+        self.add_argument("--project", help="XNAT project")
+        self.add_argument("--subject", help="XNAT subject")
+        self.add_argument("--session", help="XNAT session")
+        self.add_argument("--config", help="Config file name")
+        self.add_argument("--set-imgprops", action="store_true", default=False, help="Set test result properties directly on images")
+
 def main():
     """
-    Main script entry poin
+    Main script entry point
     """
     options = ArgumentParser().parse_args()
 
@@ -277,34 +315,22 @@ def main():
         if not os.path.isdir(options.input):
             raise RuntimeError(f"Input directory {options.input} does not exist")
 
-        # Hack to disable certificate validation for HTTPS connections. This is required
-        # becuase the certificate used for UoN servers are not always signed by a CA that
-        # is recognized by the fixed set of CA certificates built in to python requests.
-        #os.environ["CURL_CA_BUNDLE"] = ""
-
-        # We need to download scan metadata to identify the ID of the scan more reliably from the directory name
-        # The scan ID is required in order to set scan properties correctly via REST - the scan label does not always work
         options.host, options.user, options.password = os.environ["XNAT_HOST"], os.environ.get("XNAT_USER", None), os.environ.get("XNAT_PASS", None)
         if not options.user:
             options.user = getpass.getuser()
         if not options.password:
             options.password = getpass.getpass()
+        LOG.info(f"XNAT server: {options.host} {options.user}")
 
-        url = f"{options.host}/data/projects/{options.project}/subjects/{options.subject}/experiments/{options.session}/scans?format=csv"
-        LOG.info(f"Getting session scan metadata from {url}")
-        r = requests.get(url, verify=False, auth=(options.user, options.password))
-        if r.status_code != 200:
-            raise RuntimeError(f"Failed to download session scan data: {r.text}")
-        scandata = list(csv.DictReader(io.StringIO(r.text)))
-
-        options.pop_stats = get_pop_stats(options)
+        options.tests = get_test_config(options)
+        options.scan_metadata = get_scan_metadata(options)
 
         found_session = False
         for path, dirs, files in os.walk(options.input):
             if "scans" in [d.lower() for d in dirs]:
                 if not found_session:
                     found_session = True
-                    session_results = run_session(options, path, scandata)
+                    session_results = run_session(options, path)
                 else:
                     LOG.warning(f"Found another session: {path} - ignoring")
 
