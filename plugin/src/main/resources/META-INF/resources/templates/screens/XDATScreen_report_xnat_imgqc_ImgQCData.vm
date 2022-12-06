@@ -32,6 +32,7 @@ $page.setVlinkColor($ui.vlink)
 	<TABLE>
 		<TR>
 		  <TH/>
+		  <TH>Test</TH>
 		  <TH>Result</TH>
 		  <TH>Population mean</TH>
 		  <TH>Population STD</TH>
@@ -44,6 +45,7 @@ $page.setVlinkColor($ui.vlink)
 		<!-- Iterate over tests -->
 		#foreach ($test in $scan.getChildItems("test"))
 		<TR>
+			<TD>$!test.getStringProperty("img")</TD>
 			<TD>$!test.getStringProperty("name")</TD>
 			<TD>$!test.getStringProperty("result")</TD>
 			<TD>$!test.getStringProperty("pop_mean")</TD>
