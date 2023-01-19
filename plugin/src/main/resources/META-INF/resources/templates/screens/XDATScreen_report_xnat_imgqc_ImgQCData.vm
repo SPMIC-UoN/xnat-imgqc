@@ -42,12 +42,12 @@ $page.setVlinkColor($ui.vlink)
 	<!-- Iterate over scans -->
     #foreach ($scan in $item.getChildItems("xnat_imgqc:ImgQCData/scan"))
 	    #if ($scan.getChildItems("test").size() > 0)
-			#set($scan_type = $!scan.getStringProperty("scan_type"))
+			#set($scan_type=$!scan.getStringProperty("scan_type"))
 			<TR style="border-bottom: 1px solid black;">
-			#if($scan_type == "")
-				<TD span="5"><b>$!scan.getStringProperty("scan_id")</b></TD>
-			#else
+			#if($!{$scan_type})
 				<TD span="5"><b>$!scan.getStringProperty("scan_id"): $scan_type</b></TD>
+			#else
+				<TD span="5"><b>$!scan.getStringProperty("scan_id")</b></TD>
 			#end
 			</TR>
 			<!-- Iterate over tests -->
