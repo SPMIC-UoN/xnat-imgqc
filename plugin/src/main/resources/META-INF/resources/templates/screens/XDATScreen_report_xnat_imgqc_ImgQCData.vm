@@ -29,9 +29,9 @@ $page.setVlinkColor($ui.vlink)
 		</TR>
 	</TABLE>
 
-	<TABLE>
-		<TR>
-		  <TH/>
+	<TABLE style="border: 1px solid black; border-collapse: collapse;">
+		<TR style="border-bottom: 3px double black;">
+		  <TH>Scan / image</TH>
 		  <TH>Test</TH>
 		  <TH>Result</TH>
 		  <TH>Population mean</TH>
@@ -41,28 +41,37 @@ $page.setVlinkColor($ui.vlink)
 
 	<!-- Iterate over scans -->
     #foreach ($scan in $item.getChildItems("xnat_imgqc:ImgQCData/scan"))
-		<TR><TD span="5"><b>$!scan.getStringProperty("scan_id"): $!scan.getStringProperty("scan_type")</b></TD></TR>
-		<!-- Iterate over tests -->
-		#foreach ($test in $scan.getChildItems("test"))
-		<TR>
-			<TD>$!test.getStringProperty("img")</TD>
-			<TD>$!test.getStringProperty("name")</TD>
-			<TD>$!test.getStringProperty("result")</TD>
-			<TD>$!test.getStringProperty("pop_mean")</TD>
-			<TD>$!test.getStringProperty("pop_std")</TD>
-			#set($status=$!test.getStringProperty("status"))
-			#if($status == "PASS")
-				#set($style=$pass_style)
-			#elseif($status == "WARN")
-				#set($style=$warn_style)
-			#elseif($status == "FAIL")
-				#set($style=$fail_style)
+	    #if ($scan.getChildItems("test").size() > 0)
+			#set($scan_type = $!scan.getStringProperty("scan_type"))
+			<TR style="border-bottom: 1px solid black;">
+			#if($scan_type == "")
+				<TD span="5"><b>$!scan.getStringProperty("scan_id")</b></TD>
 			#else
-				#set($style="")
+				<TD span="5"><b>$!scan.getStringProperty("scan_id"): $scan_type</b></TD>
 			#end
-			<TD style="$style">$!test.getStringProperty("status")</TD>
-		</TR>
-		<!-- tests -->
+			</TR>
+			<!-- Iterate over tests -->
+			#foreach ($test in $scan.getChildItems("test"))
+			<TR>
+				<TD>$!test.getStringProperty("img")</TD>
+				<TD>$!test.getStringProperty("name")</TD>
+				<TD>$!test.getStringProperty("result")</TD>
+				<TD>$!test.getStringProperty("pop_mean")</TD>
+				<TD>$!test.getStringProperty("pop_std")</TD>
+				#set($status=$!test.getStringProperty("status"))
+				#if($status == "PASS")
+					#set($style=$pass_style)
+				#elseif($status == "WARN")
+					#set($style=$warn_style)
+				#elseif($status == "FAIL")
+					#set($style=$fail_style)
+				#else
+					#set($style="")
+				#end
+				<TD style="$style">$!test.getStringProperty("status")</TD>
+			</TR>
+			<!-- tests -->
+			#end
 		#end
 	<!-- scans -->
 	#end
