@@ -173,7 +173,8 @@ def create_xml(options, session_results):
     for scan in session_results.values():
         xml += "  <scan>\n"
         xml += f"    <scan_id>{scan['id']}</scan_id>\n"
-        xml += f"    <scan_type>{scan['type']}</scan_type>\n"
+        if scan['type'] != scan['id']:
+            xml += f"    <scan_type>{scan['type']}</scan_type>\n"
         for img_name, tests in scan["images"].items():
             for test_name, test_data in tests.items():
                 result = test_data["result"]
