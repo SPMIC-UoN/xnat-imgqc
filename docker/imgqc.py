@@ -255,7 +255,7 @@ def get_test_config(options):
         LOG.info("Downloading config from XNAT")
         fname = "downloaded_config.xlsx"
         with requests.get(f"{options.host}/data/projects/{options.project}/resources/imgqc/files/imgqc_conf.xlsx",
-                          auth=(options.user, options.password), stream=True) as r:
+                          auth=(options.user, options.password), verify=False, stream=True) as r:
             r.raise_for_status()
             with open(fname, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192): 

@@ -13,7 +13,7 @@ RUN cd /tmp && \
 	cmake -DBATCH_VERSION=ON -DUSE_OPENJPEG=ON .. && \
 	make && make install
 
-RUN pip install ukat>=0.6.4 validators wget
+RUN pip install ukat>=0.6.4 validators wget pandas openpyxl
 
 ADD version.txt .
 ADD imgqc.py .
