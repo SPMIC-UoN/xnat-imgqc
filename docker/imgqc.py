@@ -1,5 +1,10 @@
 """
 ImgQC: Simple image based quality control for XNAT MR sessions
+
+Currently only a single test - image SNR - is defined. However the
+system is designed to feature multiple tests. A configuration file
+defines which tests apply to which scans/vendors and what the 'normal'
+range for the results should be.
 """
 import argparse
 import getpass
@@ -20,7 +25,6 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 
-from ukat.data import fetch
 from ukat.qa import snr
 
 def convert_dicoms(dicomdir, scanid):
@@ -229,6 +233,22 @@ def get_test_config(options):
     Read test configuration which is stored in an Excel spreadsheet with coloumns:
     
     matchers, exclusions, vendors, test, mean, std, amber, red
+
+    'matchers' are comma-separated case-insensitive substrings, one of which must be present in the 
+    filename of an input for the test to be used
+
+    'exclusions' are comma separated case-insensitive substrings. If any are present in the filename
+    of an input, the test will not be used
+
+    'vendors' is a comma separated case insensitive list of vendors which the test will apply to.
+    If blank, the test applies to any vendor
+
+    'test' is a case-insensitive test name which must be known to imgqc
+
+    'mean' and 'std' describe the comparison distribution for this test
+
+    'amber' and 'red' are the number of standard deviations from the mean for a result to be categorized
+    as amber or red
     """
     fname = options.config
     if not fname:
@@ -294,7 +314,6 @@ class ArgumentParser(argparse.ArgumentParser):
         self.add_argument("--subject", help="XNAT subject")
         self.add_argument("--session", help="XNAT session")
         self.add_argument("--config", help="Config file name")
-        self.add_argument("--set-imgprops", action="store_true", default=False, help="Set test result properties directly on images")
 
 def main():
     """
