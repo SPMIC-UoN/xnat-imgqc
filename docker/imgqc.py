@@ -30,7 +30,7 @@ from ukat.qa import snr
 def convert_dicoms(dicomdir, scanid):
     niftidir = os.path.join("/tmp", str(scanid), "nifti")
     os.makedirs(niftidir, exist_ok=True, mode=0o777)
-    cmd = "dcm2niix -o %s %s %s" % (niftidir, "-m n -f %n_%p_%q -z y", dicomdir)
+    cmd = "dcm2niix -o %s %s %s" % (niftidir, "-m n -f %d_%q -z y", dicomdir)
     LOG.info(cmd)
     retval = os.system(cmd)
     if retval != 0:
@@ -101,6 +101,7 @@ def run_scan(options, scan, scandir, scanid):
             LOG.warning(f"{fname} for scan {scan} was not a valid NIFTI file - ignoring")
             continue
 
+        LOG.warning(f"Found Nifti file: {fname} for scan {scan}")
         img_name = fname[:fname.index(".nii")]
         scan_results["images"][img_name] = {}
         LOG.info(f"Looking for tests for scan {img_name}")
@@ -169,7 +170,8 @@ def run_session(options, sessiondir):
         if not scanid:
             LOG.warning(f"Could not get scan ID for {scan}: metadata was {options.scan_metadata} - skipping")
             continue
-        session_results[scan] = run_scan(options, scan, scandir, scanid[0])
+        LOG.info(f"Found scan ID {scanid}")
+        session_results[scan] = run_scan(options, scan, scandir, scanid)
     return session_results
 
 XML_HEADER = """<?xml version="1.0" encoding="UTF-8"?>
