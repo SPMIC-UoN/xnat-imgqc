@@ -127,6 +127,29 @@ def run_scan(options, scan, scandir, scanid):
 
     return scan_results
 
+def get_scan(scandname, options):
+    """
+    Try to identify a scan from the name of the DICOM directory
+
+    FIXME this is messy because we aren't quite sure how XNAT names scan dirs
+    """
+    # First look for exact ID match
+    for scanmd in options.scan_metadata:
+        id = scanmd["ID"]
+        if id  == scandname:
+            return id
+
+    # Now look for longest startswith match
+    match_len, ret = -1, None
+    for scanmd in options.scan_metadata:
+        id = scanmd["ID"]
+        if scandname.startswith(id) and len(id) > match_len:
+            ret = id
+            match_len = len(id)
+
+    # May be None if we found nothing matching
+    return ret
+
 def run_session(options, sessiondir):
     """
     Run image QC on all scans in a session
@@ -142,10 +165,9 @@ def run_session(options, sessiondir):
     for scan in os.listdir(scansdir):
         scandir = os.path.join(scansdir, scan)
         LOG.info(f"Checking {scan}")
-        # FIXME very hacky, relies on consistent XNAT naming convention for dir.
-        scanid = [scanmd["ID"] for scanmd in options.scan_metadata if scan.startswith(scanmd["ID"])]
-        if len(scanid) != 1:
-            LOG.warning(f"Could not reliably get scan ID for {scan}: metadata was {options.scan_metadata} - skipping")
+        scanid = get_scan(scan, options)
+        if not scanid:
+            LOG.warning(f"Could not get scan ID for {scan}: metadata was {options.scan_metadata} - skipping")
             continue
         session_results[scan] = run_scan(options, scan, scandir, scanid[0])
     return session_results
