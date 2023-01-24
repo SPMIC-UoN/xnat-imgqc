@@ -1,13 +1,14 @@
 """
 IMGQC_POPSTATS: Generate population statistics from imgqc data
 
-This script can be run on a project to calculate population mean/std for 
-tests run by the imgqc container. They can then be added to the configuration
+This script can be run in two modes: 'stats' calculates population mean/std for 
+tests run by the imgqc container in a project. They can then be added to the configuration
 file so that individual scan results can be RAG rated.
 
-Note that this involves a re-run of IMGQC on all sessions each time the stats
-are updated. This is obviously not ideal, if it proves a problem the container
-could be revised so it can be run in 'update RAG only' mode.
+'rag' goes through existing ImgQC assessors and updates the pass/warn/fail status
+based on the mean/std defined on the project.
+
+This whole script is pretty messy and in need of rationalizing
 """
 import argparse
 import csv
@@ -24,7 +25,7 @@ from io import StringIO
 import numpy as np
 import xmltodict
 
-from imgqc import get_test_config, test_is_relevant
+from imgqc import get_test_config, test_is_relevant, create_xml
 
 LOG = logging.getLogger(__name__)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -33,25 +34,40 @@ def get_sessions(options):
     """
     Get session details for all sessions in specified project
     """
-    url = f"{options.host}/data/projects/{options.project_id}/experiments/"
+    url = f"{options.host}/data/projects/{options.project_id}/subjects/"
     params = {"xsiType": "xnat:mrSessionData", "format" : "csv"}
-    LOG.debug(f"Getting sessions {url} {params}")
+    LOG.debug(f"Getting subjects {url} {params}")
     r = requests.get(url, verify=False, auth=(options.user, options.password), params=params)
     if r.status_code != 200:
         raise RuntimeError(f"Failed to download sessions for project {options.project_id}: {r.text}")
-    return list(csv.DictReader(io.StringIO(r.text)))
+    subjects = list(csv.DictReader(io.StringIO(r.text)))
+    sessions = []
+
+    for subject in subjects:
+        url = f"{options.host}/data/projects/{options.project_id}/subjects/{subject['ID']}/experiments/"
+        LOG.debug(f"Getting sessions {url} {params}")
+        r = requests.get(url, verify=False, auth=(options.user, options.password), params=params)
+        if r.status_code != 200:
+            raise RuntimeError(f"Failed to download sessions for project {options.project_id}: {r.text}")
+        for session in list(csv.DictReader(io.StringIO(r.text))):
+            session["subject"] = subject['ID']
+            sessions.append(session)
+
+    return sessions
 
 def login(options):
-    url = f"{options.host}/data/services/auth"
-    auth_params={"username" : options.user, "password" : options.password}
-    LOG.info(f"Logging in: {url}")
-    r = requests.put(url, verify=False, data=urllib.parse.urlencode(auth_params))
-    if r.status_code == 200:
+    if options.auth_method == "service":
+        LOG.info(f"Using XNAT authorization service")
+        url = f"{options.host}/data/services/auth"
+        auth_params={"username" : options.user, "password" : options.password}
+        LOG.info(f"Logging in: {url}")
+        r = requests.put(url, verify=False, data=urllib.parse.urlencode(auth_params))
+        r.raise_for_status()
         LOG.info("Logged in using auth service")
         options.cookies = {"JSESSIONID" : r.text}
         options.auth = None
     else:
-        LOG.info(f"Failed to log in using auth service - will use basic auth instead")
+        LOG.info(f"Using HTTP basic auth")
         options.cookies = {}
         options.auth = (options.user, options.password)
 
@@ -79,26 +95,139 @@ def get_project(options):
     projects = [p["name"] for p in projects]
     raise RuntimeError("Project not found: {options.project} - known project: {projects}")
 
-def add_results_from_session(options, session):
+def get_assessor(options, session):
     """
-    Get the results from the ImgQC assessor and add them to matching results list
+    Get the results from the ImgQC assessor for a session
 
-    This assumes that each result from the assessor matches exactly one row in the config.
-    The same assumption is made when the QC is run.
+    Assumes only one such assessor exists - which should be the case!
+
+    :return: List of scan dictionaries
     """
     url = "%s/data/experiments/%s/assessors/" % (options.host, session["ID"])
     LOG.info(f"Getting imgqc assessors from URL: {url}")
     r = requests.get(url, auth=options.auth, cookies=options.cookies, params={"format" : "csv", "xsiType" : "xnat_imgqc:ImgQCData", "columns" : "ID"}, verify=False)
     r.raise_for_status()
     f = StringIO(r.text)
-    scans = []
+    assessor_id, scans = None, []
     for row in csv.DictReader(f, skipinitialspace=True):
-        url = "%s/data/experiments/%s/assessors/%s" % (options.host, session["ID"], row['ID'])
+        assessor_id = row['ID']
+        url = "%s/data/experiments/%s/assessors/%s" % (options.host, session["ID"], assessor_id)
         LOG.info(f"Getting ImqQC results from URL: {url}")
         r = requests.get(url, auth=options.auth, cookies=options.cookies, params={"format" : "xml"}, verify=False)
         r.raise_for_status()
         d = xmltodict.parse(r.text)["xnat_imgqc:ImgQCData"]
         scans = d.get("xnat_imgqc:scan", [])
+    return assessor_id, scans
+ 
+def update_xml(options, assessor_id, xml):
+    """
+    Update assessor on XNAT
+    """
+    with open("temp.xml", "w") as f:
+        f.write(xml)
+    LOG.info(f"Uploading XML to {options.host}")
+
+    LOG.info("Deleting existing assessor")
+    delete_url = "%s/data/projects/%s/subjects/%s/experiments/%s/assessors/%s" % (options.host, options.project, options.subject, options.session, assessor_id)
+    LOG.info(f"Delete URL: {delete_url}")
+    r = requests.delete(delete_url, auth=options.auth, cookies=options.cookies, verify=False)
+    print(r.status_code, r.text)
+    if r.status_code != 200:
+        LOG.warning("Failed to delete existing assessor")
+        LOG.warning(f"{r.status_code}: {r.text}")
+    else:
+        LOG.info("Delete successful - posting update")
+
+    with open("temp.xml", "r") as f:
+        files = {'file': f}
+        while True:
+            url = "%s/data/projects/%s/subjects/%s/experiments/%s/assessors/" % (options.host, options.project, options.subject, options.session)
+            LOG.info(f"Post URL: {url}")
+            r = requests.post(url, files=files, auth=options.auth, cookies=options.cookies, verify=False, allow_redirects=False)
+            if r.status_code in (301, 302):
+                LOG.info("Redirect: {r.headers['Location']}")
+                f.seek(0)
+                url = r.headers["Location"]
+                continue
+
+            if r.status_code != 200:
+                sys.stderr.write(xml)
+                raise RuntimeError(f"Failed to create assessor: {r.status_code} {r.text}")
+            break
+
+def rag_session(options, session):
+    """
+    Collect results from the ImgQC assessor for a session, add RAG categorization
+    and re-upload XML assessor
+    """
+    assessor_id, scans = get_assessor(options, session)
+    if not scans:
+        return
+
+    session_results = {}
+    for scan in scans:
+        print(scan)
+        if not isinstance(scan, dict):
+            continue
+        scanid = scan["xnat_imgqc:scan_id"]
+        images = {}
+        tests = scan.get("xnat_imgqc:test", [])
+        if isinstance(tests, dict):
+            tests = [tests]
+        for test in tests:
+            test_name = test["xnat_imgqc:name"]
+            img_name = test["xnat_imgqc:img"]
+            result = float(test["xnat_imgqc:result"])
+            status = None
+            try:
+                # For each test found, loop through test definition and find the relevant entries
+                # FIXME vendors is not being used
+                for matchers, exclusions, vendors, config_test_name, mean, std, amber, red in options.tests:
+                    if config_test_name == test_name and test_is_relevant(img_name, matchers, exclusions, vendors):
+                        LOG.info(f"Adding RAG status for {test_name} result {result} for {img_name} to matcher: {matchers}, exclusions {exclusions}")
+                        sigma = abs(result - mean) / std
+                        if sigma > red:
+                            status = "FAIL"
+                        elif sigma > amber:
+                            status = "WARN"
+                        else:
+                            status = "PASS"
+                        break
+            except:
+                LOG.exception(f"Failed to RAG test result: {test} - ignoring")
+
+            if img_name not in images:
+                images[img_name] = {}
+
+            if status is not None:
+                images[img_name][test_name] = {
+                    "result" : result,
+                    "status" : status,
+                    "mean" : mean,
+                    "std" : std,
+                }
+            
+        session_results[scanid] = {
+            "id" : scanid,
+            "type" : scan.get("xnat_imgqc:scan_type", scanid),
+            "images" : images
+        }
+
+    # FIXME hack
+    options.session = session["ID"]
+    options.subject = session["subject"]
+    new_xml = create_xml(options, session_results)
+    print(new_xml)
+    update_xml(options, assessor_id, new_xml)
+
+def add_results_from_session(options, session):
+    """
+    Collect results from the ImgQC assessor on a session and add them to matching results list
+
+    This assumes that each result from the assessor matches exactly one row in the config.
+    The same assumption is made when the QC is run.
+    """
+    _assessor_id, scans = get_assessor(options, session)
 
     if isinstance(scans, dict):
         scans = [scans]
@@ -127,21 +256,29 @@ class ArgumentParser(argparse.ArgumentParser):
         self.add_argument("--project", help="XNAT project", required=True)
         self.add_argument("--user", help="XNAT username")
         self.add_argument("--config", help="Config file name - if not given will download from XNAT")
+        self.add_argument("--auth-method", help="Authorization method: basic or service", choices=["basic", "service"], default="basic")
+        self.add_argument("--mode", help="Run mode - generate stat or RAG existing results", choices=["stats", "rag"], default="stats")
 
 def main():
     """
     Main script entry point
     """
     options = ArgumentParser().parse_args()
-    version = "0.0.1" # FIXME
+    
+    try:
+        with open("version.txt") as f:
+            options.version = f.read().strip()
+    except IOError:
+        options.version = "(unknown)"
 
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-    LOG.info(f"IMGQC_POPSTATS v{version}")
+    LOG.info(f"IMGQC_POPSTATS v{options.version}")
 
     try:
         if not options.user:
             options.user = input("XNAT username: ")
         options.password = getpass.getpass()
+        options.host = options.host.rstrip("/") # Double slashes confuses XNAT
         LOG.info(f"Using XNAT: {options.host} with user: {options.user}")
 
         login(options)
@@ -155,26 +292,30 @@ def main():
 
         for idx, session in enumerate(sessions):
             LOG.info(f"Processing session {idx}: {session['label']}")
-            add_results_from_session(options, session)
-        
-        writer = None
-        with open("imgqc_popstats.csv", "w") as f:
-            for test_def, test_results in zip(options.tests, options.test_results):
-                matchers, exclusions, vendors, test_name, mean, std, amber, red = test_def
-                outdata = {
-                    "matchers" : ",".join(matchers),
-                    "exclusions" : ",".join(exclusions),
-                    "vendors" : ",".join(vendors),
-                    "test_name" : test_name,
-                    "mean" : np.mean(test_results),
-                    "std" : np.std(test_results),
-                    "amber" : amber,
-                    "red" : red,
-                }
-                if writer is None:
-                    writer = csv.DictWriter(f, outdata.keys())
-                    writer.writeheader()
-                writer.writerow(outdata)
+            if options.mode == "stats":
+                add_results_from_session(options, session)
+            else:
+                rag_session(options, session)
+
+        if options.mode == "stats":
+            writer = None
+            with open("imgqc_popstats.csv", "w") as f:
+                for test_def, test_results in zip(options.tests, options.test_results):
+                    matchers, exclusions, vendors, test_name, mean, std, amber, red = test_def
+                    outdata = {
+                        "matchers" : ",".join(matchers),
+                        "exclusions" : ",".join(exclusions),
+                        "vendors" : ",".join(vendors),
+                        "test_name" : test_name,
+                        "mean" : np.mean(test_results),
+                        "std" : np.std(test_results),
+                        "amber" : amber,
+                        "red" : red,
+                    }
+                    if writer is None:
+                        writer = csv.DictWriter(f, outdata.keys())
+                        writer.writeheader()
+                    writer.writerow(outdata)
     except Exception as exc:
         LOG.error(exc)
         traceback.print_exc()
