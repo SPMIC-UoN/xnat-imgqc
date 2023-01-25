@@ -39,7 +39,7 @@ def get_sessions(options):
     LOG.debug(f"Getting subjects {url} {params}")
     r = requests.get(url, verify=False, auth=(options.user, options.password), params=params)
     if r.status_code != 200:
-        raise RuntimeError(f"Failed to download sessions for project {options.project_id}: {r.text}")
+        raise RuntimeError(f"Failed to download subjects for project {options.project_id}: {r.text}")
     subjects = list(csv.DictReader(io.StringIO(r.text)))
     sessions = []
 
@@ -51,6 +51,7 @@ def get_sessions(options):
             raise RuntimeError(f"Failed to download sessions for project {options.project_id}: {r.text}")
         for session in list(csv.DictReader(io.StringIO(r.text))):
             session["subject"] = subject['ID']
+            session["subject_label"] = subject['label']
             sessions.append(session)
 
     return sessions
@@ -131,7 +132,6 @@ def update_xml(options, assessor_id, xml):
     delete_url = "%s/data/projects/%s/subjects/%s/experiments/%s/assessors/%s" % (options.host, options.project, options.subject, options.session, assessor_id)
     LOG.info(f"Delete URL: {delete_url}")
     r = requests.delete(delete_url, auth=options.auth, cookies=options.cookies, verify=False)
-    print(r.status_code, r.text)
     if r.status_code != 200:
         LOG.warning("Failed to delete existing assessor")
         LOG.warning(f"{r.status_code}: {r.text}")
@@ -154,6 +154,57 @@ def update_xml(options, assessor_id, xml):
                 sys.stderr.write(xml)
                 raise RuntimeError(f"Failed to create assessor: {r.status_code} {r.text}")
             break
+
+def get_matching_test_def(options, img_name, test_name):
+    """
+    Loop through test definitions in config file and find the relevant entry
+    for a given test result. 
+
+    FIXME vendors is not being used
+    FIXME assumes a given entry will match at most one row - this same assumption is made
+    when running tests
+    """
+    try:
+        for matchers, exclusions, vendors, config_test_name, mean, std, amber, red in options.tests:
+            if config_test_name == test_name and test_is_relevant(img_name, matchers, exclusions, vendors):
+                return matchers, exclusions, vendors, config_test_name, mean, std, amber, red
+    except:
+        LOG.exception(f"Failed to find matching configuration entry for test: {test_name} on image {img_name} - ignoring")
+        return None
+
+def report_session(options, session):
+    """
+    Output subject-level reports for session
+    """
+    assessor_id, scans = get_assessor(options, session)
+    if not scans:
+        return []
+
+    results = []
+    for scan in scans:
+        if not isinstance(scan, dict):
+            continue
+        scanid = scan["xnat_imgqc:scan_id"]
+        tests = scan.get("xnat_imgqc:test", [])
+        if isinstance(tests, dict):
+            tests = [tests]
+        for test in tests:
+            test_name = test["xnat_imgqc:name"]
+            img_name = test["xnat_imgqc:img"]
+            test_def =  get_matching_test_def(options, img_name, test_name)
+            if test_def:
+                row = {
+                    "subject" : session["subject_label"],
+                    "session" : session["label"],
+                    "scanid" : scanid,
+                    "matcher" : ":".join(test_def[0]),
+                    "test_name" : test_name,
+                    "img_name" : img_name,
+                    "result" : float(test["xnat_imgqc:result"]),
+                }
+                results.append(row)
+
+    return results
 
 def rag_session(options, session):
     """
@@ -179,22 +230,18 @@ def rag_session(options, session):
             img_name = test["xnat_imgqc:img"]
             result = float(test["xnat_imgqc:result"])
             status = None
-            try:
-                # For each test found, loop through test definition and find the relevant entries
-                # FIXME vendors is not being used
-                for matchers, exclusions, vendors, config_test_name, mean, std, amber, red in options.tests:
-                    if config_test_name == test_name and test_is_relevant(img_name, matchers, exclusions, vendors):
-                        LOG.info(f"Adding RAG status for {test_name} result {result} for {img_name} to matcher: {matchers}, exclusions {exclusions}")
-                        sigma = abs(result - mean) / std
-                        if sigma > red:
-                            status = "FAIL"
-                        elif sigma > amber:
-                            status = "WARN"
-                        else:
-                            status = "PASS"
-                        break
-            except:
-                LOG.exception(f"Failed to RAG test result: {test} - ignoring")
+            test_def =  get_matching_test_def(options, img_name, test_name)
+            if test_def:
+                _matchers, _exclusions, _vendors, _config_test_name, mean, std, amber, red = test_def
+                LOG.info(f"Adding RAG status for {test_name} result {result} for {img_name}")
+                sigma = abs(result - mean) / std
+                if sigma > red:
+                    status = "FAIL"
+                elif sigma > amber:
+                    status = "WARN"
+                else:
+                    status = "PASS"
+                break
 
             if img_name not in images:
                 images[img_name] = {}
@@ -257,7 +304,7 @@ class ArgumentParser(argparse.ArgumentParser):
         self.add_argument("--user", help="XNAT username")
         self.add_argument("--config", help="Config file name - if not given will download from XNAT")
         self.add_argument("--auth-method", help="Authorization method: basic or service", choices=["basic", "service"], default="basic")
-        self.add_argument("--mode", help="Run mode - generate stat or RAG existing results", choices=["stats", "rag"], default="stats")
+        self.add_argument("--mode", help="Run mode - generate stat, RAG existing results or generate report", choices=["stats", "rag", "report"], default="stats")
 
 def main():
     """
@@ -289,17 +336,20 @@ def main():
 
         options.tests = get_test_config(options)
         options.test_results = [[] for t in options.tests]
+        options.report_rows = []
 
         for idx, session in enumerate(sessions):
             LOG.info(f"Processing session {idx}: {session['label']}")
             if options.mode == "stats":
                 add_results_from_session(options, session)
-            else:
+            elif options.mode == "rag":
                 rag_session(options, session)
+            else:
+                options.report_rows += report_session(options, session)
 
         if options.mode == "stats":
             writer = None
-            with open("imgqc_popstats.csv", "w") as f:
+            with open(f"imgqc_popstats_{options.project}.csv", "w") as f:
                 for test_def, test_results in zip(options.tests, options.test_results):
                     matchers, exclusions, vendors, test_name, mean, std, amber, red = test_def
                     outdata = {
@@ -316,6 +366,16 @@ def main():
                         writer = csv.DictWriter(f, outdata.keys())
                         writer.writeheader()
                     writer.writerow(outdata)
+
+        if options.mode == "report":
+            writer = None
+            with open(f"imgqc_stats_report_{options.project}.csv", "w") as f:
+                for row in options.report_rows:
+                    if writer is None:
+                        writer = csv.DictWriter(f, row.keys())
+                        writer.writeheader()
+                    writer.writerow(row)
+
     except Exception as exc:
         LOG.error(exc)
         traceback.print_exc()
