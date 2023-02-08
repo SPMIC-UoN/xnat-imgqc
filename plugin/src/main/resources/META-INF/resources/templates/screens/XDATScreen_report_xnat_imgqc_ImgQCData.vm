@@ -33,6 +33,7 @@ $page.setVlinkColor($ui.vlink)
 		<TR style="border-bottom: 3px double black;">
 		  <TH>Scan / image</TH>
 		  <TH>Test</TH>
+		  <TH>Mask</TH>
 		  <TH>Result</TH>
 		  <TH>Population mean</TH>
 		  <TH>Population STD</TH>
@@ -55,6 +56,7 @@ $page.setVlinkColor($ui.vlink)
 			<TR>
 				<TD>$!test.getStringProperty("img")</TD>
 				<TD>$!test.getStringProperty("name")</TD>
+				<TD>$!test.getStringProperty("mask")</TD>
 				<TD>$!test.getStringProperty("result")</TD>
 				<TD>$!test.getStringProperty("pop_mean")</TD>
 				<TD>$!test.getStringProperty("pop_std")</TD>
