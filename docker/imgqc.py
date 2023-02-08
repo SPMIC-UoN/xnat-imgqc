@@ -7,7 +7,6 @@ defines which tests apply to which scans/vendors and what the 'normal'
 range for the results should be.
 """
 import argparse
-import getpass
 import os
 import sys
 import requests
@@ -16,10 +15,6 @@ import csv
 import logging
 import datetime
 import traceback
-import urllib3
-
-LOG = logging.getLogger(__name__)
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 import nibabel as nib
 import numpy as np
@@ -27,6 +22,18 @@ import pandas as pd
 
 from ukat.qa import snr
 
+from xnat_nott import convert_dicoms, get_version, setup_logging, get_credentials, xnat_upload, xnat_download, xnat_login
+
+LOG = logging.getLogger(__name__)
+
+def calc_isnr(nii):
+    isnr = snr.Isnr(nii.get_fdata(), nii.header.get_best_affine()).isnr
+    return isnr
+    
+KNOWN_TESTS = {
+    "isnr" : calc_isnr,
+}
+ 
 def convert_dicoms(dicomdir, scanid):
     niftidir = os.path.join("/tmp", str(scanid), "nifti")
     os.makedirs(niftidir, exist_ok=True, mode=0o777)
@@ -38,42 +45,35 @@ def convert_dicoms(dicomdir, scanid):
         return None
     return niftidir
 
-def calc_isnr(nii):
-    isnr = snr.Isnr(nii.get_fdata(), nii.header.get_best_affine()).isnr
-    return isnr
-     
-def get_test_stats(options, test_name, img_name):
-    test_stats = options.pop_stats.get(test_name.split()[0].lower(), None)
-    if test_stats:
-        for matcher, mean, std in test_stats:
-            if matcher == "*" or matcher.lower() in img_name.lower():
-                return mean, std
-
-KNOWN_TESTS = {
-    "isnr" : calc_isnr,
-}
-
-def test_is_relevant(img_name, matchers, exclusions, vendors):
+def test_is_relevant(img_name, test_config):
+    """
+    :return: True if test is relevant to this image
+    
+    FIXME vendor check requires json metadata
+    """
     matched = False
-    for m in matchers:
-        LOG.debug(f"Checking matcher: {m.lower()}, {img_name.lower()}")
+    for m in test_config["matchers"]:
+        LOG.debug(f" - Checking matcher: {m.lower()}, {img_name.lower()}")
         if m.lower() in img_name.lower():
-            LOG.debug("match")
+            LOG.debug(" - Match")
             matched = True
             break
 
     if matched:
-        for e in exclusions:
-            LOG.debug(f"Checking exclusion: {e.lower()}, {img_name.lower()}")
+        for e in test_config["exclusions"]:
+            LOG.debug(f" - Checking exclusion: {e.lower()}, {img_name.lower()}")
             if e.lower() in img_name.lower():
-                LOG.debug("excluded")
+                LOG.debug(" - Excluded")
                 matched = False
                 break
 
-    # FIXME vendor check requires json metadata
     return matched
 
 def run_scan(options, scan, scandir, scanid):
+    """
+    Run tests on a scan
+    """
+    LOG.info(f"Running scan ID {scanid}")
     scan_results = {"id" : scanid, "type" : scan, "images" : {}}
     if os.path.isdir(os.path.join(scandir, "resources")):
         niftidir = os.path.join(scandir, "resources", "NIFTI")
@@ -82,8 +82,11 @@ def run_scan(options, scan, scandir, scanid):
         niftidir = os.path.join(scandir, "NIFTI")
         dicomdir = os.path.join(scandir, "DICOM")
 
-    LOG.info(f"This version of IMGQC uses DICOMs in preference to NIFTI")
-    niftidir = convert_dicoms(dicomdir, scanid)
+    LOG.info(f" - This version of IMGQC uses DICOMs in preference to NIFTI")
+    niftidir = convert_dicoms(dicomdir, os.path.join("/tmp", str(scanid), "nifti"))
+    if not niftidir:
+        LOG.warning(f" - DICOM conversion failed - skipping scan")
+        return scan_results
 
     for fname in os.listdir(niftidir):
         if not (fname.endswith(".nii") or fname.endswith(".nii.gz")):
@@ -91,41 +94,48 @@ def run_scan(options, scan, scandir, scanid):
 
         fpath = os.path.join(niftidir, fname)
         if not os.path.isfile(fpath):
-            LOG.warning(f"{fpath} for scan {scan} is not a file - ignoring")
+            LOG.warning(f" - {fpath} for scan {scan} is not a file - ignoring")
             continue
 
         try:
             nii = nib.load(fpath)
         except:
             traceback.print_exc()
-            LOG.warning(f"{fname} for scan {scan} was not a valid NIFTI file - ignoring")
+            LOG.warning(f" - {fname} for scan {scan} was not a valid NIFTI file - ignoring")
             continue
 
-        LOG.warning(f"Found Nifti file: {fname} for scan {scan}")
+        LOG.info(f" - Found Nifti file: {fname} for scan {scan}")
         img_name = fname[:fname.index(".nii")]
         scan_results["images"][img_name] = {}
-        LOG.info(f"Looking for tests for scan {img_name}")
-        for matchers, exclusions, vendors, test_name, mean, std, amber, red in options.tests:
+        LOG.info(f" - Looking for tests for scan {img_name}")
+        for test_config in options.tests:
+            test_name = test_config["name"]
             test_impl = KNOWN_TESTS.get(test_name, None)
             if test_impl is None:
-                LOG.warning(f"Unknown test: {test_name} - skipping")
+                LOG.warning(f" - Unknown test: {test_name} - skipping")
                 continue
             
-            if test_is_relevant(img_name, matchers, exclusions, vendors):
-                LOG.info(f"Applying test {test_name} to scan {img_name}")
+            if test_config.get('masks', None):
+                LOG.warning(f" - Masks defined - not currently supported and will be ignored")
+
+            if test_is_relevant(img_name, test_config):
+                LOG.info(f" - Applying test {test_name} to scan {img_name}")
                 result = test_impl(nii)
                 scan_results["images"][img_name][test_name] = {"result" : result}
 
+                mean, std = test_config.get("mean", None), test_config.get("std", None)
+                amber, red = test_config.get("amber", None), test_config.get("red", None)
                 if mean and std and amber and red:
-                    LOG.info(f"Population stats for {test_name} / {img_name}: {mean} {std}")
+                    LOG.info(f" - Population stats for {test_name} / {img_name}: {mean} {std}")
                     sigma = np.abs(result - mean) / std
                     status = "PASS" if sigma < amber else "WARN" if sigma < red else "FAIL"
                     scan_results["images"][img_name][test_name]["mean"] = mean
                     scan_results["images"][img_name][test_name]["std"] = std
                     scan_results["images"][img_name][test_name]["status"] = status
                 else:
-                    LOG.info(f"No population stats for {test_name} / {img_name}")
+                    LOG.info(f" - No population stats / flagging criteria found for {test_name} / {img_name}")
 
+    LOG.info(f"DONE running scan ID {scanid}")
     return scan_results
 
 def get_scan(scandname, options):
@@ -169,8 +179,7 @@ def run_session(options, sessiondir):
         scanid = get_scan(scan, options)
         if not scanid:
             LOG.warning(f"Could not get scan ID for {scan}: metadata was {options.scan_metadata} - skipping")
-            continue
-        LOG.info(f"Found scan ID {scanid}")
+            continues
         session_results[scan] = run_scan(options, scan, scandir, scanid)
     return session_results
 
@@ -224,34 +233,8 @@ def upload_xml(options, xml):
     """
     with open("temp.xml", "w") as f:
         f.write(xml)
-    LOG.info(f"Uploading XML to {options.host}")
-
-    with open("temp.xml", "r") as f:
-        files = {'file': f}
-        url = "%s/data/projects/%s/subjects/%s/experiments/%s/assessors/" % (options.host, options.project, options.subject, options.session)
-        while True:
-            LOG.info(f"Post URL: {url}")
-            r = requests.post(url, files=files, auth=(options.user, options.password), verify=False, allow_redirects=False)
-            if r.status_code in (301, 302):
-                LOG.info("Redirect: {r.headers['Location']}")
-                f.seek(0)
-                url = r.headers["Location"]
-                continue
-
-            elif r.status_code == 409:
-                LOG.info("ImgQC assessor already exists - will delete and replace")
-                delete_url = url + f"IMGQC_{options.session}"
-                LOG.info(f"Delete URL: {delete_url}")
-                r = requests.delete(delete_url, auth=(options.user, options.password), verify=False)
-                if r.status_code == 200:
-                    LOG.info("Delete successful - re-posting")
-                    f.seek(0)
-                    continue
-
-            if r.status_code != 200:
-                sys.stderr.write(xml)
-                raise RuntimeError(f"Failed to create assessor: {r.status_code} {r.text}")
-            break
+    url = f"data/projects/{options.project}/subjects/{options.subject}/experiments/{options.session}/assessors/"
+    xnat_upload(options, url, "temp.xml", f"IMGQC_{options.session}")
 
 def get_test_config(options):
     """
@@ -270,6 +253,9 @@ def get_test_config(options):
 
     'test' is a case-insensitive test name which must be known to imgqc
 
+    'masks' is an optional comma-separated list of masks to apply to the image before testing. Masks are identified
+    from Nifti files in the session
+
     'mean' and 'std' describe the comparison distribution for this test
 
     'amber' and 'red' are the number of standard deviations from the mean for a result to be categorized
@@ -279,41 +265,42 @@ def get_test_config(options):
     if not fname:
         LOG.info("Downloading config from XNAT")
         fname = "downloaded_config.xlsx"
-        with requests.get(f"{options.host}/data/projects/{options.project}/resources/imgqc/files/imgqc_conf.xlsx",
-                          auth=(options.user, options.password), verify=False, stream=True) as r:
-            r.raise_for_status()
-            with open(fname, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192): 
-                    f.write(chunk)
+        xnat_download(options, f"/data/projects/{options.project}/resources/imgqc/files/imgqc_conf.xlsx", local_fname=fname)
 
     sheet = pd.read_excel(fname, dtype=str)
     test_config = sheet.fillna('')
     tests = []
-    for index, row in test_config.iterrows():
+    for _index, row in test_config.iterrows():
         LOG.info(row)
         if len(row) < 8:
             LOG.warning(f"Invalid row - at least 8 columns required. Skipping")
             continue
 
-        matchers, exclusions, vendors, test, mean, std, amber, red = row[:8]
-        matchers = [m.strip().upper() for m in matchers.split(",")]
-        exclusions = [e.strip().upper() for e in exclusions.split(",") if e.strip() != ""]
-        vendors = [v.strip().upper() for v in vendors.split(",") if v.strip() != ""]
-        test = test.strip().lower()
-        if not test:
-            LOG.warning(f"Test name missing - skipping")
+        if len(row) == 8:
+            matchers, exclusions, vendors, test_name, mean, std, amber, red = row[:9]
+            masks = ""
+        else:
+            matchers, exclusions, vendors, test_name, masks, mean, std, amber, red = row[:9]
+        test_config = {}
+        test_config["matchers"] = [m.strip().upper() for m in matchers.split(",")]
+        test_config["exclusions"] = [e.strip().upper() for e in exclusions.split(",") if e.strip() != ""]
+        test_config["vendors"] = [v.strip().upper() for v in vendors.split(",") if v.strip() != ""]
+        test_config["masks"] = [m.strip().upper() for m in masks.split(",") if m.strip() != ""]
+        test_config["name"] = test_name.strip().lower()
+        if not test_config["name"]:
+            LOG.warning(f"Test name missing in {row} - skipping")
             continue
 
         try:
-            if mean: mean = float(mean)
-            if std: std = float(std)
-            if amber: amber = float(amber)
-            if red: red = float(red)
+            if mean: test_config["mean"] = float(mean)
+            if std: test_config["std"] = float(std)
+            if amber: test_config["amber"] = float(amber)
+            if red: test_config["red"] = float(red)
         except ValueError:
             LOG.warning(f"Invalid numeric data in row {row} - skipping")
             continue
 
-        tests.append((matchers, exclusions, vendors, test, mean, std, amber, red))
+        tests.append(test_config)
 
     return tests
 
@@ -326,7 +313,7 @@ def get_scan_metadata(options):
     """
     url = f"{options.host}/data/projects/{options.project}/subjects/{options.subject}/experiments/{options.session}/scans?format=csv"
     LOG.info(f"Getting session scan metadata from {url}")
-    r = requests.get(url, verify=False, auth=(options.user, options.password))
+    r = requests.get(url, verify=False, auth=options.auth, cookies=options.cookies)
     if r.status_code != 200:
         raise RuntimeError(f"Failed to download session scan data: {r.text}")
     return list(csv.DictReader(io.StringIO(r.text)))
@@ -335,36 +322,28 @@ class ArgumentParser(argparse.ArgumentParser):
     def __init__(self, **kwargs):
         argparse.ArgumentParser.__init__(self, prog="imgqc", add_help=False, **kwargs)
         self.add_argument("--input", help="Input directory", required=True)
-        self.add_argument("--project", help="XNAT project")
-        self.add_argument("--subject", help="XNAT subject")
-        self.add_argument("--session", help="XNAT session")
+        self.add_argument("--host", help="XNAT host")
+        self.add_argument("--user", help="XNAT user")
+        self.add_argument("--project", help="XNAT project", required=True)
+        self.add_argument("--subject", help="XNAT subject", required=True)
+        self.add_argument("--session", help="XNAT session", required=True)
         self.add_argument("--config", help="Config file name")
+        self.add_argument("--debug", help="Use debug logging")
 
 def main():
     """
     Main script entry point
     """
     options = ArgumentParser().parse_args()
-
+    setup_logging(options)
     try:
-        with open("version.txt") as f:
-            options.version = f.read().strip()
-    except IOError:
-        options.version = "(unknown)"
+        get_version(options)
+        LOG.info(f"Image QC v{options.version}")
+        get_credentials(options)
+        xnat_login(options)
 
-    logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-    LOG.info(f"Image QC v{options.version}")
-
-    try:
         if not os.path.isdir(options.input):
             raise RuntimeError(f"Input directory {options.input} does not exist")
-
-        options.host, options.user, options.password = os.environ["XNAT_HOST"], os.environ.get("XNAT_USER", None), os.environ.get("XNAT_PASS", None)
-        if not options.user:
-            options.user = getpass.getuser()
-        if not options.password:
-            options.password = getpass.getpass()
-        LOG.info(f"XNAT server: {options.host} {options.user}")
 
         options.tests = get_test_config(options)
         options.scan_metadata = get_scan_metadata(options)
@@ -382,11 +361,10 @@ def main():
             LOG.warning(f"No sessions found")
 
         xml = create_xml(options, session_results)
-        upload_xml(options, xml)
+        #upload_xml(options, xml)
 
     except Exception as exc:
-        LOG.error(exc)
-        traceback.print_exc()
+        LOG.exception("Unexpected error")
         sys.exit(1)
 
 if __name__ == "__main__":
